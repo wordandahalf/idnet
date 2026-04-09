@@ -101,7 +101,7 @@ class Trainer(CallbackBridge):
             raise NotImplementedError
 
     def resume_model_from_ckpt(self, ckpt):
-        ckpt = torch.load(ckpt)
+        ckpt = torch.load(ckpt, map_location='cpu:0')
         if "model" in ckpt:
             self.model.load_state_dict(ckpt["model"])
         elif "model_state_dict" in ckpt:
