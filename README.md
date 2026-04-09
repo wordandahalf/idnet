@@ -31,10 +31,10 @@ conda env create --file environment.yml
 
 ## Download (For Evaluation)
 The DSEC dataset for optical flow can be downloaded [here](https://dsec.ifi.uzh.ch/dsec-datasets/download/).
-Use script [download_dsec_test.py](download_dsec_test.py) for your convenience.
+Use script [download_dsec_test.py](scripts/download-dsec-test.py) for your convenience.
 It downloads the dataset directly into the `DATA_DIRECTORY` with the expected directory structure.
 ```python
-download_dsec_test.py <DATA_DIRECTORY>
+scripts/download-dsec-test.py <DATA_DIRECTORY>
 ```
 Once downloaded, create a symbolic link called  `data` pointing to the data directory:
 ```

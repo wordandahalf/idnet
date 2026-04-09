@@ -55,6 +55,7 @@ if __name__ == '__main__':
     for seq_name in TEST_SEQUENCES:
         seq_path = output_dir / seq_name
         os.makedirs(seq_path, exist_ok=True)
+        print(f"Downloading sequence '{seq_name}' to '{seq_path}'...") 
 
         # image timestamps
         img_timestamps_url = BASE_TEST_URL + seq_name + \
@@ -63,12 +64,14 @@ if __name__ == '__main__':
         if not img_timestamps_file.exists():
             assert download(img_timestamps_url,
                             img_timestamps_file), img_timestamps_url
+        print(f"Done downloading and extracting image timestamps.") 
 
         # test timestamps
         test_timestamps_file_destination = seq_path / 'test_forward_flow_timestamps.csv'
         if not test_timestamps_file_destination.exists():
             shutil.move(test_timestamps_dir / (seq_name + '.csv'),
                         test_timestamps_file_destination)
+        print(f"Done downloading and extracting test timestamps.")
 
         # event data
         events_left_url = BASE_TEST_URL + seq_name + '/' + seq_name + '_events_left.zip'
@@ -76,5 +79,7 @@ if __name__ == '__main__':
         if not (events_left_file.parent / events_left_file.stem).exists():
             assert download(events_left_url, events_left_file), events_left_url
             unzip(events_left_file)
+        print(f"Done downloading and extracting event data.")
 
+        print(f"Done downloading and extracting sequence '{seq_name}'")
     shutil.rmtree(test_timestamps_dir)
