@@ -96,7 +96,7 @@ class EventSlicer:
         t_start_us_idx = t_start_ms_idx + idx_start_offset
         t_end_us_idx = t_start_ms_idx + idx_end_offset
         # Again add t_offset to get gps time
-        events['t'] = time_array_conservative[idx_start_offset:idx_end_offset] + self.t_offset
+        events['t'] = time_array_conservative[idx_start_offset:idx_end_offset].astype(np.uint64) + self.t_offset
         for dset_str in ['p', 'x', 'y']:
             events[dset_str] = np.asarray(
                 self.events[dset_str][t_start_us_idx:t_end_us_idx])
@@ -190,6 +190,7 @@ class EventSlicer:
 
 
 class Sequence(Dataset):
+    """This defines the scheme we need"""
     def __init__(self, seq_path: Path, representation_type: RepresentationType, mode: str = 'test', delta_t_ms: int = 100,
                  num_bins: int = 15, transforms=[], name_idx=0, visualize=False, load_gt=False):
         assert num_bins >= 1
@@ -215,7 +216,7 @@ class Sequence(Dataset):
         self.visualize_samples = visualize
         self.load_gt = load_gt
         self.transforms = transforms
-        if self.mode is "test":
+        if self.mode == "test":
             # Get Test Timestamp File
             ev_dir_location = seq_path / 'events_left'
             timestamp_file = seq_path / 'test_forward_flow_timestamps.csv'
@@ -224,8 +225,7 @@ class Sequence(Dataset):
                 flow_path / 'image_timestamps.txt', dtype='int64')
             self.indices = np.arange(len(timestamps_images))[::2][1:-1]
             self.timestamps_flow = timestamps_images[::2][1:-1]
-
-        elif self.mode is "train":
+        elif self.mode == "train":
             ev_dir_location = seq_path / 'events' / 'left'
             seq_name = seq_path.parts[-1]
             flow_path = seq_path.parents[1] / \
