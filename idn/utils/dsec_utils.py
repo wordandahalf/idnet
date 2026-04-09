@@ -29,28 +29,38 @@ class VoxelGrid(EventRepresentation):
         C, H, W = self.voxel_grid.shape
         with torch.no_grad():
             self.voxel_grid = self.voxel_grid.to(events['p'].device)
-            voxel_grid = self.voxel_grid.clone()
+            voxel_grid = self.voxel_grid.clone().to('cuda')
 
-            t_norm = events['t']
+            # transfer events to gpu for speedup of highly vectorized ops
+            evs_x = events['x'].to('cuda')
+            evs_y = events['y'].to('cuda')
+            evs_t = events['t'].to('cuda')
+            evs_p = events['p'].to('cuda')
+
+            t_norm = evs_t
             t_norm = (C - 1) * (t_norm-t_norm[0]) / (t_norm[-1]-t_norm[0])
 
-            x0 = events['x'].int()
-            y0 = events['y'].int()
-            t0 = t_norm.int()
+            # precompute once, take computational slowdown instead of repeated conversion + allocation
+            x0 = evs_x.long()
+            y0 = evs_y.long()
+            t0 = t_norm.long()
 
-            value = 2*events['p']-1
-            #start_t = time()
+            value = 2*evs_p-1
             for xlim in [x0, x0+1]:
                 for ylim in [y0, y0+1]:
                     for tlim in [t0, t0+1]:
 
                         mask = (xlim < W) & (xlim >= 0) & (ylim < H) & (
                             ylim >= 0) & (tlim >= 0) & (tlim < self.nb_channels)
-                        interp_weights = value * (1 - (xlim-events['x']).abs()) * (
-                            1 - (ylim-events['y']).abs()) * (1 - (tlim - t_norm).abs())
-                        index = H * W * tlim.long() + \
-                            W * ylim.long() + \
-                            xlim.long()
+                        # todo: wlog, the difference (1 - (xlim - evs_x).abs()) doesn't actually
+                        # todo: need to be calculated; it's either the factional part of evs_x or
+                        # todo: 1 less the fractional part of evs_x. in general,
+                        # todo: we can just precalculate these six tensors and then apply whichever one we need.
+                        interp_weights = value * (1 - (xlim-evs_x).abs()) * (
+                            1 - (ylim-evs_y).abs()) * (1 - (tlim - t_norm).abs())
+                        index = H * W * tlim + \
+                            W * ylim + \
+                            xlim
 
                         voxel_grid.put_(
                             index[mask], interp_weights[mask], accumulate=True)
@@ -65,7 +75,7 @@ class VoxelGrid(EventRepresentation):
                     else:
                         voxel_grid[mask] = voxel_grid[mask] - mean
 
-        return voxel_grid
+        return voxel_grid.to('cpu')
 
 
 class PolarityCount(EventRepresentation):
