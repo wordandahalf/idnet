@@ -23,11 +23,14 @@ If you use this code in an academic context, please cite our work:
   doi={10.1109/ICRA57147.2024.10610353}}
 ```
 
-## Dependency
-Create a conda env and install dependencies by running
+## Dependencies
+Create a virtual env and install dependencies by running:
 ```
-conda env create --file environment.yml
+pip -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
 ```
+The code is tested working with Python 3.13.
 
 ## Download (For Evaluation)
 The DSEC dataset for optical flow can be downloaded [here](https://dsec.ifi.uzh.ch/dsec-datasets/download/).
