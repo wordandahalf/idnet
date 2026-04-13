@@ -234,7 +234,7 @@ def main():
 
             path = Path(f"{args.results_dir}/{dataset_config['dataset_name']}/{sequence_name}/flow")
             path.parent.mkdir(parents=True, exist_ok=True)
-            np.save(path, np.stack(flows))
+            np.savez_compressed(path, flows=np.stack(flows).astype(np.float16), timestamps=sequence.dataset.timestamps_flow.astype(np.uint32))
 
 if __name__ == '__main__':
     main()
