@@ -1,7 +1,7 @@
 """
 Creates a video of a sequence's optical flow estimates.
 Example usage:
-    python create-video.py results/dsec/zurich_city_12_a --flow --distribution
+    python create-visualizations.py results/dsec/zurich_city_12_a --video-flow --video-distribution --plot-mean
 """
 
 import argparse
@@ -10,6 +10,7 @@ from pathlib import Path
 import numpy as np
 import cv2
 from matplotlib import pyplot as plt, animation
+from scipy import stats
 
 
 def flow_to_frames(flow: np.ndarray) -> np.ndarray:
@@ -51,8 +52,8 @@ def create_distribution_video(path: Path, flows: np.ndarray, fps: float, ignore_
 
         ax.clear()
         ax.hist2d(frame[0, :], frame[1, :], bins=bin_edges, density=True)
-        ax.set_xlabel("Horizontal Component (dps)")
-        ax.set_ylabel("Vertical Component (dps)")
+        ax.set_xlabel("Horizontal")
+        ax.set_ylabel("Vertical")
         ax.set_title(f"Estimate {i} / {flows.shape[0]}")
         ax.set_aspect(1.0)
 
@@ -60,11 +61,42 @@ def create_distribution_video(path: Path, flows: np.ndarray, fps: float, ignore_
     ani.save(path / "distribution.mp4")
 
 
+def plot_flow(path: Path, flows: np.ndarray, timestamps: np.ndarray):
+    N, channels, height, width = flows.shape
+    flows = flows.reshape(N, channels, height * width)
+    mean_flows = np.mean(flows, axis=-1)
+    mode_flows, _ = stats.mode(flows, axis=-1)
+
+    plt.figure(figsize=(24, 4))
+    plt.plot(timestamps[1:] / 1e6, mean_flows[:, 0], label='Horizontal (mean)', c='r')
+    plt.plot(timestamps[1:] / 1e6, mode_flows[:, 0], label='Horizontal (mode)', c='r', ls='--')
+    plt.plot(timestamps[1:] / 1e6, mean_flows[:, 1], label='Vertical (mean)', c='b')
+    plt.plot(timestamps[1:] / 1e6, mode_flows[:, 1], label='Vertical (mode)', c='b', ls='--')
+    plt.xlabel("Time (s)")
+    plt.ylabel("Flow (deg)")
+    plt.title("Flow Estimate Statistics")
+    plt.xlim(0, timestamps[-1] / 1e6)
+    plt.ylim(-90, 90)
+    plt.legend(ncols=2)
+    plt.tight_layout()
+    plt.savefig(path / "statistics.svg")
+
+    std_flows = np.std(flows.astype(np.float32), axis=-1)
+    mean_std_flow = np.mean(std_flows, axis=0)
+
+    plt.figure(figsize=(12, 4))
+    plt.plot(timestamps[1:] / 1e6, std_flows[:, 0], label='Horizontal (std.)', c='r')
+    plt.plot(timestamps[1:] / 1e6, std_flows[:, 1], label='Vertical (std.)', c='b')
+    plt.title(f"Flow Concentration\n({mean_std_flow[0]:.2f}, {mean_std_flow[1]:.2f})")
+    plt.savefig(path / "concentration.svg")
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('sequence', type=str, help='path to sequence')
-    parser.add_argument('--flow', action='store_true', help='create a false-color video of the estimated flows')
-    parser.add_argument('--distribution', action='store_true', help='create a video of the distribution of estimated flows')
+    parser.add_argument('--video-flow', action='store_true', help='create a false-color video of the estimated flows')
+    parser.add_argument('--video-distribution', action='store_true', help='create a video of the distribution of estimated flows')
+    parser.add_argument('--plot-flow', action='store_true', help='create a plot of the estimated flows')
 
     args = parser.parse_args()
     sequence_path = Path(args.sequence)
@@ -79,10 +111,12 @@ def main():
 
     fps = 1e6 / np.diff(timestamps).mean()
 
-    if args.flow:
+    if args.video_flow:
         create_flow_video(sequence_path, flows, fps)
-    if args.distribution:
+    if args.video_distribution:
         create_distribution_video(sequence_path, flows, fps)
+    if args.plot_flow:
+        plot_flow(sequence_path, flows, timestamps)
 
 if __name__ == '__main__':
     main()
