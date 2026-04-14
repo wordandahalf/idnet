@@ -92,7 +92,7 @@ class EcdSlicer(EventSlicer):
 
 
 class EcdSequence(Sequence):
-    def __init__(self, seq_path: Path, num_bins=15, delta_t_ms=100):
+    def __init__(self, seq_path: Path, num_bins=15, delta_t_ms=100, already_rectified=False):
         self.seq_name = PurePath(seq_path).name
         self.mode = 'test'
         self.name_idx = 0
@@ -126,9 +126,24 @@ class EcdSequence(Sequence):
             np.column_stack(np.unravel_index(np.arange(self.width*self.height), (self.height, self.width)))
                 .reshape(-1, 1, 2)
                 .astype(np.float32))
-        self.rectify_ev_map =(
-            cv2.undistortPoints(pixel_points, self.camera_matrix, self.distortion_parameters, P=self.camera_matrix)
-                .reshape(self.height, self.width, 2))
+
+        if not already_rectified:
+            self.rectify_ev_map =(
+                cv2.undistortPoints(pixel_points, self.camera_matrix, self.distortion_parameters, P=self.camera_matrix)
+                    .reshape(self.height, self.width, 2))
+            self.already_rectified = False
+        else:
+            self.already_rectified = True
+
+    def rectify_events(self, x: np.ndarray, y: np.ndarray):
+        if self.already_rectified: return np.column_stack((x, y))
+
+        rectify_map = self.rectify_ev_map
+        assert rectify_map.shape == (
+            self.height, self.width, 2), rectify_map.shape
+        assert x.max() < self.width
+        assert y.max() < self.height
+        return rectify_map[y, x]
 
 
 def parse_arguments():
@@ -137,6 +152,8 @@ def parse_arguments():
     parser.add_argument("--sequences", type=str, default="", help="comma-separated list of sequences to inference")
     parser.add_argument("--cuda-device", type=str, default='cuda:0', help="torch-style CUDA device identifier")
     parser.add_argument("--dataset-type", type=str, default='dsec', choices=['dsec', 'ecd'], help="format of the data to load")
+    # todo: hacky...
+    parser.add_argument("--already-rectified", action='store_true', help="indicates the stored events are already rectified (undistorted)")
     parser.add_argument("data_dir", type=str, help='directory in which dataset is stored')
     parser.add_argument("results_dir", type=str, help='directory in which to store results')
     return parser.parse_args()
@@ -182,7 +199,7 @@ def evaluate_model(self, model, cuda_device: str):
         self.cleanup_model(model)
         model.to(original_device)
 
-def load_data(dataset_type: str, dataset_config: Dict, data_root: Path, sequences: List[str]) -> List[DataLoader]:
+def load_data(dataset_type: str, dataset_config: Dict, data_root: Path, sequences: List[str], already_rectified=False) -> List[DataLoader]:
     if len(sequences) == 0: sequences = list(data_root.iterdir())
     else: sequences = [ data_root / sequence for sequence in sequences ]
 
@@ -193,7 +210,7 @@ def load_data(dataset_type: str, dataset_config: Dict, data_root: Path, sequence
         )
     elif dataset_type == 'ecd':
         # todo: need to support "recurrent" sequences for TID.
-        sequences = [EcdSequence(it) for it in filter(lambda sequence: (sequence / "data.h5").is_file(), sequences)]
+        sequences = [EcdSequence(it, already_rectified=already_rectified) for it in filter(lambda sequence: (sequence / "data.h5").is_file(), sequences)]
 
     collate_fn = rec_train_collate if dataset_config.get("recurrent", False) else train_collate
     return [ DataLoader(seq, collate_fn=collate_fn, **DATALOADER_CONFIG) for seq in sequences ]
@@ -212,7 +229,7 @@ def main():
     # load data
     sequences = args.sequences.split(',')
     dataset_config = DATASET_CONFIG | DATASET_CONFIG_OVERRIDES[model_type]
-    data_loader = load_data(args.dataset_type, dataset_config, data_root, sequences)
+    data_loader = load_data(args.dataset_type, dataset_config, data_root, sequences, already_rectified=args.already_rectified)
 
     # configure model
     model.cuda(args.cuda_device)
