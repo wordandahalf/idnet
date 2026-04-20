@@ -13,16 +13,31 @@ from matplotlib import pyplot as plt, animation, colors
 from scipy import stats
 
 
+def flow_to_polar(flow: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Convert (H, W, 2) flow to magnitude and angle (degrees) arrays."""
+    flow = flow.astype(np.float32)
+    mag, ang = cv2.cartToPolar(flow[..., 0], flow[..., 1])
+    return mag, np.degrees(ang)
+
+
+def polar_to_rgb(mag: np.ndarray, ang_deg: np.ndarray) -> np.ndarray:
+    """Build HSV-coded RGB image from precomputed magnitude and angle."""
+    hsv = np.zeros((*mag.shape[:2], 3), dtype=np.uint8)
+    hsv[..., 0] = (ang_deg / 2).astype(np.uint8)
+    hsv[..., 1] = 255
+    hsv[..., 2] = cv2.normalize(mag, None, 0, 255, cv2.NORM_MINMAX)
+    return cv2.cvtColor(hsv, cv2.COLOR_HSV2RGB)
+
+
 def flow_to_frames(flow: np.ndarray) -> np.ndarray:
     flow = flow.squeeze()
     _, h, w = flow.shape
-    scaled_flow = np.rint((flow/2 + 2**7)).astype(np.uint8).transpose(1, 2, 0)
-    flow_image = np.concatenate((scaled_flow, np.zeros((h, w, 1), dtype=np.uint8)), axis=-1)
-    return flow_image
+    mag, ang_degrees = flow_to_polar(flow)
+    return polar_to_rgb(mag, ang_degrees)
 
 
 def create_flow_video(path: Path, flows: np.ndarray, fps: float):
-    frames = [flow_to_frames(flows[i, ...]) for i in range(flows.shape[0])]
+    frames = [flow_to_frames(np.transpose(flows[i, ...], (1, 2, 0))) for i in range(flows.shape[0])]
     height, width, layers = frames[0].shape
 
     print(f"Loaded {len(frames)} {width}x{height}x{layers} flow estimates")
