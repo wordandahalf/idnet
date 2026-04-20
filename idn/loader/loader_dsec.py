@@ -322,7 +322,7 @@ class Sequence(Dataset):
     def __len__(self):
         return len(self.timestamps_flow) - 1
 
-    def rectify_events(self, x: np.ndarray, y: np.ndarray):
+    def rectify_events(self, x: np.ndarray, y: np.ndarray, t: np.ndarray):
         # assert location in self.locations
         # From distorted to undistorted
         rectify_map = self.rectify_ev_map
@@ -361,7 +361,7 @@ class Sequence(Dataset):
             x = event_data['x']
             y = event_data['y']
 
-            xy_rect = self.rectify_events(x, y)
+            xy_rect = self.rectify_events(x, y, t)
             x_rect = xy_rect[:, 0]
             y_rect = xy_rect[:, 1]
 
@@ -449,7 +449,7 @@ class Sequence(Dataset):
         x = event_data['x']
         y = event_data['y']
 
-        xy_rect = self.rectify_events(x, y)
+        xy_rect = self.rectify_events(x, y, t)
         x_rect = xy_rect[:, 0]
         y_rect = xy_rect[:, 1]
         return self.events_to_voxel_grid(p, t, x_rect, y_rect)
@@ -487,7 +487,7 @@ class Sequence(Dataset):
             }
             x = event_data_torch['x']
             y = event_data_torch['y']
-            xy_rect = self.rectify_events(x.int(), y.int())
+            xy_rect = self.rectify_events(x.int(), y.int(), t)
             x_rect = torch.from_numpy(xy_rect[:, 0]).long()
             y_rect = torch.from_numpy(xy_rect[:, 1]).long()
             value = 2*event_data_torch['p']-1

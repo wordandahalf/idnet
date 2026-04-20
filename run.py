@@ -5,6 +5,7 @@ from math import ceil
 from pathlib import Path, PurePath
 from typing import Tuple, List, Dict
 
+import numpy
 import torch
 import h5py
 import cv2
@@ -122,22 +123,23 @@ class EcdSequence(Sequence):
         self.voxel_grid = VoxelGrid((self.num_bins, self.height, self.width), normalize=True)
         self.event_slicer = EcdSlicer(self.h5f)
 
-        pixel_points =(
-            np.column_stack(np.unravel_index(np.arange(self.width*self.height), (self.height, self.width)))
-                .reshape(-1, 1, 2)
-                .astype(np.float32))
-
         if not already_rectified:
+            pixel_points =(
+                np.column_stack(np.unravel_index(np.arange(self.width * self.height), (self.height, self.width))[::-1])
+                    .reshape(-1, 1, 2)
+                    .astype(np.float32))
+
             self.rectify_ev_map =(
                 cv2.undistortPoints(pixel_points, self.camera_matrix, self.distortion_parameters, P=self.camera_matrix)
                     .reshape(self.height, self.width, 2))
+
             self.already_rectified = False
         else:
             self.already_rectified = True
 
-    def rectify_events(self, x: np.ndarray, y: np.ndarray):
-        if self.already_rectified: return np.column_stack((x, y))
-
+    def rectify_events(self, x: np.ndarray, y: np.ndarray, t: np.ndarray):
+        # assert location in self.locations
+        # From distorted to undistorted
         rectify_map = self.rectify_ev_map
         assert rectify_map.shape == (
             self.height, self.width, 2), rectify_map.shape
@@ -146,14 +148,101 @@ class EcdSequence(Sequence):
         return rectify_map[y, x]
 
 
+class MotionCompensatedEcdSequence(EcdSequence):
+    def __init__(self, seq_path: Path, num_bins=15, delta_t_ms=100):
+        super().__init__(seq_path, num_bins, delta_t_ms, already_rectified=False)
+
+        pixel_points = (
+            np.column_stack(np.unravel_index(np.arange(self.width * self.height), (self.height, self.width))[::-1])
+            .reshape(-1, 1, 2)
+            .astype(np.float32))
+
+        # our rectification map unprojects too
+        self.rectify_ev_map = (
+            cv2.undistortPoints(pixel_points, self.camera_matrix, self.distortion_parameters)
+            .reshape(self.height, self.width, 2))
+
+        self.camera_matrix = torch.from_numpy(self.camera_matrix).to(torch.float32).to('cuda')
+
+        imu = self.h5f['imu']
+        self.angular_velocity_camera_frame = {
+            'x': np.array(imu['wx']), 'y': np.array(imu['wy']), 'z': np.array(imu['wz']),
+            't': np.array(imu['t']) / 1e9 # ecd stores timestamps in nanoseconds...
+        }
+
+    def get_angular_velocity(self, ts: float) -> torch.tensor:
+        """Returns the angular velocity at the provided microsecond timestamp in the world frame."""
+        x_w = numpy.interp(ts / 1e6, self.angular_velocity_camera_frame['t'], self.angular_velocity_camera_frame['x'])
+        y_w = numpy.interp(ts / 1e6, self.angular_velocity_camera_frame['t'], self.angular_velocity_camera_frame['y'])
+        z_w = numpy.interp(ts / 1e6, self.angular_velocity_camera_frame['t'], self.angular_velocity_camera_frame['z'])
+        return torch.tensor([ x_w, y_w, z_w ])
+
+    def euler_to_rotation_matrices(self, euler_angles: torch.Tensor) -> torch.Tensor:
+        """
+        Convert a batch of Euler angles (ZYX / yaw-pitch-roll convention) to rotation matrices.
+        args:
+            euler_angles: (N, 3) tensor of [roll, pitch, yaw] in radians.
+        Returns:
+            (N, 3, 3) tensor of rotation matrices.
+        """
+        roll  = euler_angles[:, 0].to('cuda')  # Rotation about X
+        pitch = euler_angles[:, 1].to('cuda')  # Rotation about Y
+        yaw   = euler_angles[:, 2].to('cuda')  # Rotation about Z
+
+        cos_r, sin_r = torch.cos(roll), torch.sin(roll)
+        cos_p, sin_p = torch.cos(pitch), torch.sin(pitch)
+        cos_y, sin_y = torch.cos(yaw), torch.sin(yaw)
+
+        zeros = torch.zeros_like(roll)
+        ones = torch.ones_like(roll)
+
+        Rx = torch.stack([
+            ones, zeros, zeros,
+            zeros, cos_r, -sin_r,
+            zeros, sin_r, cos_r,
+        ], dim=-1).reshape(-1, 3, 3)
+
+        Ry = torch.stack([
+            cos_p, zeros, sin_p,
+            zeros, ones, zeros,
+            -sin_p, zeros, cos_p,
+        ], dim=-1).reshape(-1, 3, 3)
+
+        Rz = torch.stack([
+            cos_y, -sin_y, zeros,
+            sin_y, cos_y, zeros,
+            zeros, zeros, ones,
+        ], dim=-1).reshape(-1, 3, 3)
+
+        # Combined rotation: R = Rz @ Ry @ Rx  (intrinsic X-Y-Z = extrinsic Z-Y-X)
+        return (Rz @ Ry @ Rx).to(torch.float32)
+
+    def rectify_events(self, x: np.ndarray, y: np.ndarray, t: np.ndarray):
+        # unproject and normalize
+        unprojected = np.column_stack((super(EcdSequence, self).rectify_events(x, y, t), np.ones_like(x)))
+        unprojected /= np.linalg.norm(unprojected, axis=-1)[:, None]
+        unprojected = torch.from_numpy(unprojected).to('cuda')
+
+        # compensate, assuming constant angular velocity
+        t_init = float(t[0]); t_final = float(t[-1])
+        w_approx = self.get_angular_velocity((t_final + t_init) / 2)
+        angle = w_approx[None, :] * ((t[:, None] - t_init) / 1e6)
+
+        R = self.euler_to_rotation_matrices(angle)
+        compensated = torch.bmm(R, unprojected.unsqueeze(-1)).squeeze(-1)
+
+        reprojected = (self.camera_matrix @ compensated.T).T
+        reprojected = reprojected[:, 0:2] / reprojected[:, 2, None]
+
+        return reprojected.cpu().detach().numpy()
+
 def parse_arguments():
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", type=str, default='id-4x', choices=['id-4x', 'id-8x', 'tid'], help='name of the model to use')
     parser.add_argument("--sequences", type=str, default="", help="comma-separated list of sequences to inference")
     parser.add_argument("--cuda-device", type=str, default='cuda:0', help="torch-style CUDA device identifier")
     parser.add_argument("--dataset-type", type=str, default='dsec', choices=['dsec', 'ecd'], help="format of the data to load")
-    # todo: hacky...
-    parser.add_argument("--already-rectified", action='store_true', help="indicates the stored events are already rectified (undistorted)")
+    parser.add_argument("--compensate", action='store_true', help="indicates the events should be motion-compensated using the dataset's angular velocity")
     parser.add_argument("data_dir", type=str, help='directory in which dataset is stored')
     parser.add_argument("results_dir", type=str, help='directory in which to store results')
     return parser.parse_args()
@@ -199,7 +288,7 @@ def evaluate_model(self, model, cuda_device: str):
         self.cleanup_model(model)
         model.to(original_device)
 
-def load_data(dataset_type: str, dataset_config: Dict, data_root: Path, sequences: List[str], already_rectified=False) -> List[DataLoader]:
+def load_data(dataset_type: str, dataset_config: Dict, data_root: Path, sequences: List[str], compensate=False) -> List[DataLoader]:
     if len(sequences) == 0: sequences = list(data_root.iterdir())
     else: sequences = [ data_root / sequence for sequence in sequences ]
 
@@ -210,7 +299,8 @@ def load_data(dataset_type: str, dataset_config: Dict, data_root: Path, sequence
         )
     elif dataset_type == 'ecd':
         # todo: need to support "recurrent" sequences for TID.
-        sequences = [EcdSequence(it, already_rectified=already_rectified) for it in filter(lambda sequence: (sequence / "data.h5").is_file(), sequences)]
+        sequence_cls = MotionCompensatedEcdSequence if compensate else EcdSequence
+        sequences = [sequence_cls(it) for it in filter(lambda sequence: (sequence / "data.h5").is_file(), sequences)]
 
     collate_fn = rec_train_collate if dataset_config.get("recurrent", False) else train_collate
     return [ DataLoader(seq, collate_fn=collate_fn, **DATALOADER_CONFIG) for seq in sequences ]
@@ -229,7 +319,7 @@ def main():
     # load data
     sequences = args.sequences.split(',')
     dataset_config = DATASET_CONFIG | DATASET_CONFIG_OVERRIDES[model_type]
-    data_loader = load_data(args.dataset_type, dataset_config, data_root, sequences, already_rectified=args.already_rectified)
+    data_loader = load_data(args.dataset_type, dataset_config, data_root, sequences, compensate=args.compensate)
 
     # configure model
     model.cuda(args.cuda_device)
