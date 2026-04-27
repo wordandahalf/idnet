@@ -116,10 +116,11 @@ class EcdSequence(Sequence):
 
         # ECD stores timestamps in nanoseconds (because reasons), so we have to
         # quantize to microseconds
-        t = self.h5f["events/t"]
+        t: np.ndarray = np.array(self.h5f["events/t"]) // 1e3
+
         t_start = t[0] if timebase.start is None else max(t[0], timebase.start)
         t_end   = t[-1] if timebase.end is None else max(t[0], timebase.end)
-        self.timestamps_flow = np.arange(start=self.delta_t_us, stop=(t_start - t_end) // 1e3, step=self.delta_t_us)
+        self.timestamps_flow = np.arange(start=self.delta_t_us, stop=t_end - t_start, step=self.delta_t_us)
         self.indices = np.arange(len(self.timestamps_flow))
 
         camera_info = self.h5f['camera_info/']
@@ -253,8 +254,8 @@ def parse_arguments():
 
     parser.add_argument("--compensate", action='store_true', help="indicates the events should be motion-compensated using the dataset's angular velocity")
     parser.add_argument("--delta-time", "-dt", type=int, default=100_000, help="the time (in us) between flow estimates")
-    parser.add_argument("--start-time", '-st', type=int, default=0, help="the time (in us) of the first flow estimate")
-    parser.add_argument("--end-time", '-et', type=int, help="the maximum time (in us) of the last flow estimate")
+    parser.add_argument("--start-time", '-st', type=int, default=None, help="the time (in us) of the first flow estimate")
+    parser.add_argument("--end-time", '-et', type=int, default=None, help="the maximum time (in us) of the last flow estimate")
 
     parser.add_argument("data_dir", type=str, help='directory in which dataset is stored')
     parser.add_argument("results_dir", type=str, help='directory in which to store results')
