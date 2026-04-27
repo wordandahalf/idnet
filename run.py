@@ -1,9 +1,10 @@
 import argparse
 import types
 from contextlib import contextmanager
+from dataclasses import dataclass
 from math import ceil
 from pathlib import Path, PurePath
-from typing import Tuple, List, Dict
+from typing import Tuple, List, Dict, Optional
 
 import numpy
 import torch
@@ -55,6 +56,11 @@ DATALOADER_CONFIG = {
     "pin_memory": True,
 }
 
+@dataclass
+class Timebase:
+    start: Optional[int]
+    end:  Optional[int]
+    dt:    int
 
 class EcdSlicer(EventSlicer):
     def __init__(self, h5f: h5py.File):
@@ -93,7 +99,7 @@ class EcdSlicer(EventSlicer):
 
 
 class EcdSequence(Sequence):
-    def __init__(self, seq_path: Path, num_bins=15, delta_t_ms=100, already_rectified=False):
+    def __init__(self, seq_path: Path, timebase: Timebase, num_bins=15, already_rectified=False):
         self.seq_name = PurePath(seq_path).name
         self.mode = 'test'
         self.name_idx = 0
@@ -101,7 +107,7 @@ class EcdSequence(Sequence):
         self.load_gt = False
         self.transforms = {}
         self.idx_to_visualize = []
-        self.delta_t_us = delta_t_ms * 1000
+        self.delta_t_us = timebase.dt
 
         self.num_bins = num_bins
 
@@ -111,7 +117,9 @@ class EcdSequence(Sequence):
         # ECD stores timestamps in nanoseconds (because reasons), so we have to
         # quantize to microseconds
         t = self.h5f["events/t"]
-        self.timestamps_flow = np.arange(start=self.delta_t_us, stop=(t[-1] - t[0]) // 1e3, step=self.delta_t_us)
+        t_start = t[0] if timebase.start is None else max(t[0], timebase.start)
+        t_end   = t[-1] if timebase.end is None else max(t[0], timebase.end)
+        self.timestamps_flow = np.arange(start=self.delta_t_us, stop=(t_start - t_end) // 1e3, step=self.delta_t_us)
         self.indices = np.arange(len(self.timestamps_flow))
 
         camera_info = self.h5f['camera_info/']
@@ -149,8 +157,8 @@ class EcdSequence(Sequence):
 
 
 class MotionCompensatedEcdSequence(EcdSequence):
-    def __init__(self, seq_path: Path, num_bins=15, delta_t_ms=100):
-        super().__init__(seq_path, num_bins, delta_t_ms, already_rectified=False)
+    def __init__(self, seq_path: Path, timebase: Timebase, num_bins=15):
+        super().__init__(seq_path, timebase, num_bins, already_rectified=False)
 
         pixel_points = (
             np.column_stack(np.unravel_index(np.arange(self.width * self.height), (self.height, self.width))[::-1])
@@ -242,7 +250,12 @@ def parse_arguments():
     parser.add_argument("--sequences", type=str, default="", help="comma-separated list of sequences to inference")
     parser.add_argument("--cuda-device", type=str, default='cuda:0', help="torch-style CUDA device identifier")
     parser.add_argument("--dataset-type", type=str, default='dsec', choices=['dsec', 'ecd'], help="format of the data to load")
+
     parser.add_argument("--compensate", action='store_true', help="indicates the events should be motion-compensated using the dataset's angular velocity")
+    parser.add_argument("--delta-time", "-dt", type=int, default=100_000, help="the time (in us) between flow estimates")
+    parser.add_argument("--start-time", '-st', type=int, default=0, help="the time (in us) of the first flow estimate")
+    parser.add_argument("--end-time", '-et', type=int, help="the maximum time (in us) of the last flow estimate")
+
     parser.add_argument("data_dir", type=str, help='directory in which dataset is stored')
     parser.add_argument("results_dir", type=str, help='directory in which to store results')
     return parser.parse_args()
@@ -288,7 +301,7 @@ def evaluate_model(self, model, cuda_device: str):
         self.cleanup_model(model)
         model.to(original_device)
 
-def load_data(dataset_type: str, dataset_config: Dict, data_root: Path, sequences: List[str], compensate=False) -> List[DataLoader]:
+def load_data(dataset_type: str, dataset_config: Dict, data_root: Path, sequences: List[str], timebase: Timebase, compensate=False) -> List[DataLoader]:
     if len(sequences) == 0: sequences = list(data_root.iterdir())
     else: sequences = [ data_root / sequence for sequence in sequences ]
 
@@ -300,7 +313,7 @@ def load_data(dataset_type: str, dataset_config: Dict, data_root: Path, sequence
     elif dataset_type == 'ecd':
         # todo: need to support "recurrent" sequences for TID.
         sequence_cls = MotionCompensatedEcdSequence if compensate else EcdSequence
-        sequences = [sequence_cls(it) for it in filter(lambda sequence: (sequence / "data.h5").is_file(), sequences)]
+        sequences = [sequence_cls(it, timebase) for it in filter(lambda sequence: (sequence / "data.h5").is_file(), sequences)]
 
     collate_fn = rec_train_collate if dataset_config.get("recurrent", False) else train_collate
     return [ DataLoader(seq, collate_fn=collate_fn, **DATALOADER_CONFIG) for seq in sequences ]
@@ -319,7 +332,12 @@ def main():
     # load data
     sequences = args.sequences.split(',')
     dataset_config = DATASET_CONFIG | DATASET_CONFIG_OVERRIDES[model_type]
-    data_loader = load_data(args.dataset_type, dataset_config, data_root, sequences, compensate=args.compensate)
+    data_loader = load_data(
+        args.dataset_type, dataset_config,
+        data_root, sequences,
+        compensate=args.compensate,
+        timebase=Timebase(start=args.start_time, end=args.end_time, dt=args.delta_time)
+    )
 
     # configure model
     model.cuda(args.cuda_device)
