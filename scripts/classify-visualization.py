@@ -6,11 +6,34 @@ import cv2
 from dash import Dash, dcc, html, Input, Output, ctx, no_update
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
+from skimage.transform import downscale_local_mean
+from sklearn.cluster import HDBSCAN, DBSCAN
+from scipy.stats import mode
+from skimage.morphology import area_closing
 
+def segment_flows(
+        magnitude: np.ndarray, angles: np.ndarray,
+        mag_comp_thresh: float=10,
+        mag_med_thresh: float=1.2,
+        cluster_min_samples: int=256,
+        cluster_eps: float=8,
+) -> np.ndarray:
+    minimum_speed_mask = magnitude <= mag_med_thresh * mag_comp_thresh
+
+    if np.median(magnitude) <= mag_comp_thresh:
+        return minimum_speed_mask
+
+    hdb = DBSCAN(min_samples=cluster_min_samples, eps=cluster_eps)
+
+    labels = hdb.fit_predict(np.column_stack((magnitude, angles))).astype(float)
+    bg, _ = mode(labels)
+    return (labels == bg) | minimum_speed_mask
+
+def subsample(x: np.ndarray, n: int) -> np.ndarray:
+    return np.mean(x.reshape(-1, n), 1)
 
 def edges_to_centers(bin_edges: np.ndarray) -> np.ndarray:
     return (bin_edges[1:] + bin_edges[:-1]) / 2
-
 
 def flow_to_polar(flow: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """Convert (H, W, 2) flow to magnitude and angle (degrees) arrays."""
@@ -30,6 +53,7 @@ def polar_to_rgb(mag: np.ndarray, ang_deg: np.ndarray) -> np.ndarray:
 
 def main():
     parser = argparse.ArgumentParser()
+    parser.add_argument("--port", "-p", type=int, default=8050)
     parser.add_argument('sequence', type=str, help='path to sequence')
     args = parser.parse_args()
 
@@ -135,6 +159,11 @@ def main():
                         ],
                         style={"flexShrink": "0"},
                     ),
+                    dcc.Checklist(
+                        id="auto-segment",
+                        options=[{'label': "Auto-segment", 'value': 'on'}],
+                        value=[]
+                    ),
                     html.Button(
                         "Clear Selection",
                         id="clear-selection",
@@ -199,10 +228,14 @@ def main():
     @app.callback(
         Output("flow-graph", "figure"),
         Input("frame-slider", "value"),
+        Input("auto-segment", "value"),
         Input("selection-store", "data"),
     )
-    def update_figure(frame_idx: int, selection):
+    def update_figure(frame_idx: int, auto_segment: bool, selection):
         data = np.transpose(flows[frame_idx, ...], (1, 2, 0))
+
+        downsample_factor = (8, 8, 1)
+        data = downscale_local_mean(data, downsample_factor)
 
         # Single polar conversion for both image and histogram
         mag, ang_deg = flow_to_polar(data)
@@ -212,12 +245,17 @@ def main():
         counts, mb, ab = np.histogram2d(
             mag.ravel(), ang_deg.ravel(), bins=[mag_bins, ang_bins]
         )
+
         log_counts = np.log10(
             counts, out=np.full_like(counts, np.nan), where=(counts > 0)
         )
 
         # Apply selection mask to the image
-        if selection:
+        if auto_segment and 'on' in auto_segment:
+            mask = area_closing(segment_flows(mag.ravel(), ang_deg.ravel()).reshape(rgb.shape[:-1]))
+            display = rgb.copy()
+            display = display * ~mask[..., None]
+        elif selection:
             mask = (
                 (mag >= selection["mag_min"])
                 & (mag <= selection["mag_max"])
@@ -225,13 +263,17 @@ def main():
                 & (ang_deg <= selection["ang_max"])
             )
             display = rgb.copy()
-            display[~mask] = (display[~mask] * 0.2).astype(np.uint8)
+            display[~mask] = (display[~mask]).astype(np.uint8)
+            display[mask]  = display[mask]*0+255
         else:
             display = rgb
 
         fig = make_subplots(
             rows=1, cols=2,
-            subplot_titles=("Dense Optical Flow", "Flow Distribution (Polar)"),
+            subplot_titles=(
+                "Dense Optical Flow",
+                f"Flow Distribution (Polar)<br>mean: ({mag.mean():.1f}, {ang_deg.mean():.1f})<br>std: ({mag.std():.1f}, {ang_deg.std():.1f})"
+            ),
             horizontal_spacing=0.12,
         )
 
@@ -246,7 +288,40 @@ def main():
                 y=edges_to_centers(ab),
                 z=log_counts.T,
                 colorscale="Viridis",
-                colorbar=dict(title="log₁₀(Count)", x=1.02),
+                colorbar=dict(title="log10(Count)", x=1.02),
+            ),
+            row=1, col=2,
+        )
+
+        mode_m, mode_a = np.unravel_index(np.argmax(counts), counts.shape)
+        mode_m, mode_a = mb[mode_m], ab[mode_a]
+        fig.add_trace(
+            go.Scatter(x=[mode_m + np.diff(mb).mean() / 2], y=[mode_a + np.diff(ab).mean() / 2],
+                       mode="markers", marker=dict(color="red", size=25), showlegend=False),
+            row=1, col=2
+        )
+
+        MAX_SCATTER = 5000
+        mag_flat = mag.ravel()
+        ang_flat = ang_deg.ravel()
+        if mag_flat.size > MAX_SCATTER:
+            idx = np.random.default_rng(42).choice(mag_flat.size, MAX_SCATTER, replace=False)
+            mag_flat = mag_flat[idx]
+            ang_flat = ang_flat[idx]
+
+        fig.add_trace(
+            go.Scattergl(
+                x=mag_flat,
+                y=ang_flat,
+                mode="markers",
+                marker=dict(
+                    size=2,
+                    color="black",
+                    showscale=False,
+                    opacity=0.85,
+                ),
+                hoverinfo="skip",
+                showlegend=False,
             ),
             row=1, col=2,
         )
@@ -254,7 +329,7 @@ def main():
         fig.update_xaxes(showticklabels=False, row=1, col=1)
         fig.update_yaxes(showticklabels=False, row=1, col=1)
 
-        fig.update_yaxes(title_text="Angle (°)", row=1, col=2)
+        fig.update_yaxes(title_text="Angle (deg)", row=1, col=2)
         fig.update_xaxes(title_text="Magnitude (px)", row=1, col=2)
 
         # Enable box + lasso select on the heatmap subplot;
@@ -270,7 +345,7 @@ def main():
 
         return fig
 
-    app.run(debug=True)
+    app.run(debug=True, port=args.port)
 
 
 if __name__ == '__main__':
